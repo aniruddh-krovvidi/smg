@@ -25,6 +25,7 @@ mod power_of_two;
 mod prefix_hash;
 mod random;
 mod registry;
+pub(crate) mod reuse;
 mod round_robin;
 pub(crate) mod utils;
 

@@ -334,7 +334,9 @@ impl PolicyRegistry {
         let label = outcome_label(&outcome);
         Metrics::record_remote_index_query(label, started.elapsed());
         let scores = match outcome {
-            radix_index::client::QueryOutcome::Scores(scores) => scores,
+            radix_index::client::QueryOutcome::Scores(answers) => {
+                super::reuse::aggregate(answers, tokens.len(), block)
+            }
             _ => Vec::new(),
         };
         let overlap = RemoteOverlap {
@@ -392,7 +394,9 @@ impl PolicyRegistry {
         let label = outcome_label(&outcome);
         Metrics::record_remote_index_query(label, started.elapsed());
         let scores = match outcome {
-            radix_index::client::QueryOutcome::Scores(scores) => scores,
+            radix_index::client::QueryOutcome::Scores(answers) => {
+                super::reuse::aggregate(answers, text.len(), BYTE_BLOCK)
+            }
             _ => Vec::new(),
         };
         // The overlap-decay math divides a TOKEN backlog by `block_size`
