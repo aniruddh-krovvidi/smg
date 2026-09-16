@@ -1290,6 +1290,7 @@ mod tests {
         );
     }
 
+    #[traced_test]
     #[test]
     fn test_from_pod_rejects_an_unparsable_pod_ip() {
         let config = make_regular_config();
@@ -1298,6 +1299,9 @@ mod tests {
             status.pod_ip = Some("not-an-ip".to_string());
         }
         assert!(PodInfo::from_pod(&pod, Some(&config)).is_none());
+        // The warning is the only signal an operator gets for why a Ready,
+        // selector-matching Pod never became a worker.
+        assert!(logs_contain("has an unparsable Pod IP"));
     }
 
     #[test]
