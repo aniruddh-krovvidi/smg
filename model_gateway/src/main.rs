@@ -1403,6 +1403,21 @@ impl CliArgs {
             })
             .transpose()?;
 
+        // Port 0 parses fine as a socket address, but it is meaningless as an
+        // advertised one: peers gossip this port and cannot dial an ephemeral
+        // bind. It would also reach router discovery as the fallback mesh port
+        // for Pods whose annotation is missing or invalid, publishing `IP:0`
+        // peers into the cluster state.
+        if self.mesh_port == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "mesh_port".to_string(),
+                value: self.mesh_port.to_string(),
+                reason: "mesh port cannot be 0; peers dial the advertised port, \
+                         so it must be a fixed, routable one"
+                    .to_string(),
+            });
+        }
+
         let bind_addr = Self::parse_mesh_socket_addr(&self.mesh_host, self.mesh_port, "mesh_host")?;
         let (advertise_host, advertise_field) =
             if let Some(host) = self.mesh_advertise_host.as_deref() {
@@ -2492,6 +2507,46 @@ mod tests {
             mesh.router_selector.get("role").map(String::as_str),
             Some("router")
         );
+    }
+
+    /// Port 0 parses as a socket address, so nothing downstream rejects it:
+    /// it would be advertised to peers and used as the fallback mesh port for
+    /// router Pods with no usable annotation, publishing `IP:0` peers.
+    #[test]
+    fn mesh_port_zero_is_rejected() {
+        let cli = cli_args_from(&[
+            "--enable-mesh",
+            "--mesh-advertise-host",
+            "10.0.0.1",
+            "--mesh-port",
+            "0",
+        ]);
+        let router = cli.to_router_config(vec![], vec![]).unwrap();
+        // `ServerConfig` is not `Debug`, so unwrap the error by hand.
+        let Err(err) = cli.to_server_config(router) else {
+            panic!("mesh port 0 must be rejected");
+        };
+        assert!(
+            format!("{err}").contains("mesh port cannot be 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The same configuration with a real port still builds, so the guard is
+    /// not rejecting every meshed setup.
+    #[test]
+    fn mesh_port_nonzero_is_accepted() {
+        let cli = cli_args_from(&[
+            "--enable-mesh",
+            "--mesh-advertise-host",
+            "10.0.0.1",
+            "--mesh-port",
+            "39527",
+        ]);
+        let router = cli.to_router_config(vec![], vec![]).unwrap();
+        let server = cli.to_server_config(router).unwrap();
+        let mesh = server.mesh_server_config.expect("mesh server config");
+        assert_eq!(mesh.advertise_addr.port(), 39527);
     }
 
     #[test]
