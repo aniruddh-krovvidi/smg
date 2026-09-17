@@ -1561,6 +1561,16 @@ impl Router {
                             })
                         })
                         .transpose()?;
+                    // Mirrors the CLI check in `main.rs`: port 0 parses as a
+                    // socket address but is undialable once gossiped to peers,
+                    // and reaches router discovery as the fallback mesh port
+                    // for Pods with no usable annotation.
+                    if self.mesh_port == 0 {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "Invalid value for mesh_port='0': mesh port cannot be 0; peers dial \
+                             the advertised port, so it must be a fixed, routable one",
+                        ));
+                    }
                     let bind_addr =
                         Self::parse_mesh_socket_addr(&self.mesh_host, self.mesh_port, "mesh_host")?;
                     let (advertise_host, advertise_field) =
