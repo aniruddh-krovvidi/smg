@@ -1,11 +1,12 @@
 //! Kimi/Moonshot contract rules (Kimi-Vendor-Verifier).
 //!
-//! The sampling rules are K3's alone; other Kimi and Moonshot models keep
-//! OpenAI's ranges. Only requests entering through `ValidatedJson` reach
-//! these rules; the Responses conversion builds its chat request without them.
+//! The sampling and thinking rules are K3's alone; other Kimi and Moonshot
+//! models keep OpenAI's ranges. Only requests entering through `ValidatedJson`
+//! reach these rules; the Responses conversion builds its chat request without
+//! them.
 
 use crate::{
-    chat::{ChatCompletionRequest, ChatMessage},
+    chat::{ChatCompletionRequest, ChatMessage, ThinkingType},
     ext::kimi::DeclaredTools,
 };
 
@@ -22,6 +23,9 @@ const DEFAULT_TOP_P: f32 = TOP_P;
 /// verifier asserts 0.0 and 0.6 accepted too.
 const TEMPERATURES: [f32; 3] = [0.0, 0.6, 1.0];
 const TOP_P: f32 = 0.95;
+
+/// `thinking.effort` levels the K3 renderer accepts.
+const THINKING_EFFORTS: [&str; 3] = ["low", "high", "max"];
 
 pub(super) fn normalize_chat(req: &mut ChatCompletionRequest) {
     if !is_k3(&req.model) {
@@ -46,6 +50,7 @@ pub(super) fn normalize_chat(req: &mut ChatCompletionRequest) {
 pub(super) fn validate_chat(req: &ChatCompletionRequest) -> Result<(), validator::ValidationError> {
     if is_k3(&req.model) {
         validate_sampling(req)?;
+        validate_thinking(req)?;
     }
     for msg in &req.messages {
         let (code, role, message) = match msg {
@@ -78,7 +83,7 @@ fn is_malformed(tools: Option<&DeclaredTools>) -> bool {
     matches!(tools, Some(DeclaredTools::Malformed(_)))
 }
 
-/// Whether a model id names Kimi K3, the only Kimi model with pinned sampling.
+/// Whether a model id names Kimi K3, the only Kimi model with pinned sampling and thinking rules.
 fn is_k3(model: &str) -> bool {
     model.split('/').any(|segment| {
         super::starts_with_ignore_ascii_case(segment, "kimi-k3")
@@ -117,6 +122,32 @@ fn validate_sampling(req: &ChatCompletionRequest) -> Result<(), validator::Valid
     }
     if req.n.is_some_and(|n| n != 1) {
         return Err(pinned("n_not_allowed", "n", "1"));
+    }
+    Ok(())
+}
+
+/// K3 takes `effort` in low/high/max and no `adaptive`; `keep` is left to the renderer.
+fn validate_thinking(req: &ChatCompletionRequest) -> Result<(), validator::ValidationError> {
+    let Some(thinking) = &req.thinking else {
+        return Ok(());
+    };
+    if thinking.r#type == Some(ThinkingType::Adaptive) {
+        return Err(pinned(
+            "thinking_type_not_supported",
+            "thinking.type",
+            "enabled or disabled",
+        ));
+    }
+    if thinking
+        .effort
+        .as_deref()
+        .is_some_and(|effort| !THINKING_EFFORTS.contains(&effort))
+    {
+        return Err(pinned(
+            "thinking_effort_invalid",
+            "thinking.effort",
+            "low, high or max",
+        ));
     }
     Ok(())
 }
