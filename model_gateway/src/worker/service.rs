@@ -564,8 +564,10 @@ mod tests {
     use openai_protocol::model_card::ModelCard;
 
     use super::*;
-    use crate::worker::{BasicWorkerBuilder, WorkerType};
-    use crate::workflow::JobQueueConfig;
+    use crate::{
+        worker::{BasicWorkerBuilder, WorkerType},
+        workflow::JobQueueConfig,
+    };
 
     fn make_service(registry: Arc<WorkerRegistry>) -> WorkerService {
         WorkerService::new(
