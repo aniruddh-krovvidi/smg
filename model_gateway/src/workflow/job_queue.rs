@@ -220,15 +220,25 @@ impl JobQueue {
     /// status-map entry is taken atomically, so concurrent callers enqueue
     /// exactly one job per URL (#1533).
     pub async fn submit_if_idle(&self, job: Job) -> Result<bool, String> {
-        if !Self::claim(&self.status_map, job.worker_url(), job.job_type()) {
+        let worker_url = job.worker_url().to_string();
+        if !Self::claim(&self.status_map, &worker_url, job.job_type()) {
             return Ok(false);
         }
-        self.submit(job).await.map(|()| true)
+        self.submit(job).await.map(|()| true).inspect_err(|_| {
+            // A failed submission owns no job, so its claim must not block the next one.
+            self.status_map.remove(&worker_url);
+        })
     }
 
+    /// Only an in-flight job of the same type counts: the status map is keyed
+    /// by name across job types, so an MCP server or WASM module named like a
+    /// worker URL must not block that worker's AddWorker.
     fn claim(status_map: &DashMap<String, JobStatus>, url: &str, job_type: &'static str) -> bool {
         match status_map.entry(url.to_string()) {
-            Entry::Occupied(e) if matches!(e.get().status.as_str(), "pending" | "processing") => {
+            Entry::Occupied(e)
+                if e.get().job_type == job_type
+                    && matches!(e.get().status.as_str(), "pending" | "processing") =>
+            {
                 false
             }
             entry => {
@@ -316,11 +326,22 @@ impl JobQueue {
             Some(ctx) => {
                 let result = Self::execute_job(&job, &ctx).await;
                 let duration = start.elapsed();
-                Self::record_job_completion(job_type, &worker_url, duration, &result, &status_map);
-                if result.is_err() && matches!(job, Job::AddWorker { .. }) {
-                    // The id handed out in the 202 never got a worker; drop it (#1533).
+                // Only `POST /workers` (CreateOnly) reserves an id for its 202; a failed
+                // upsert from discovery or startup owns no reservation to drop. Release
+                // before the status turns terminal, so a retry cannot reserve the same
+                // mapping in between and have it deleted from under it (#1533).
+                if result.is_err()
+                    && matches!(
+                        job,
+                        Job::AddWorker {
+                            registration_mode: WorkerRegistrationMode::CreateOnly,
+                            ..
+                        }
+                    )
+                {
                     ctx.worker_registry.release_reservation(&worker_url);
                 }
+                Self::record_job_completion(job_type, &worker_url, duration, &result, &status_map);
             }
             None => {
                 let error_msg = "AppContext dropped".to_string();
@@ -978,6 +999,27 @@ mod tests {
             JobStatus::failed("AddWorker", "http://w:8000", "boom".to_string()),
         );
         assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
+
+        // A different job type under the same key is not a competing claim.
+        map.insert(
+            "http://w:8000".to_string(),
+            JobStatus::pending("RegisterMcpServer", "http://w:8000"),
+        );
+        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
+    }
+
+    /// A submission that fails must not leave its claim behind, or the next
+    /// create for the URL would be told a job is in flight when none is (#1533).
+    #[tokio::test]
+    async fn failed_submit_if_idle_releases_its_claim() {
+        let queue = JobQueue::new(JobQueueConfig::default(), Weak::new());
+        let job = || Job::AddWorker {
+            config: Box::new(WorkerSpec::new("http://w:8000")),
+            registration_mode: WorkerRegistrationMode::CreateOnly,
+        };
+        assert!(queue.submit_if_idle(job()).await.is_err());
+        // Before the rollback this returned Ok(false): a 202 with no job behind it.
+        assert!(queue.submit_if_idle(job()).await.is_err());
     }
 
     /// The queue channel and dispatch semaphore are sized from the config,
