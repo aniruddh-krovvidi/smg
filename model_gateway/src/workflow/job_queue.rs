@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use openai_protocol::worker::{
     ConnectionMode, JobStatus, RuntimeType, WorkerSpec, WorkerType, WorkerUpdateRequest,
 };
@@ -213,6 +213,29 @@ impl JobQueue {
         let queue_depth = self.tx.max_capacity() - self.tx.capacity();
         let available_permits = self.concurrency_limit.available_permits();
         (queue_depth, available_permits)
+    }
+
+    /// Submit unless a job for this URL is already pending or processing.
+    /// Returns `Ok(false)` when an earlier submission is still in flight. The
+    /// status-map entry is taken atomically, so concurrent callers enqueue
+    /// exactly one job per URL (#1533).
+    pub async fn submit_if_idle(&self, job: Job) -> Result<bool, String> {
+        if !Self::claim(&self.status_map, job.worker_url(), job.job_type()) {
+            return Ok(false);
+        }
+        self.submit(job).await.map(|()| true)
+    }
+
+    fn claim(status_map: &DashMap<String, JobStatus>, url: &str, job_type: &'static str) -> bool {
+        match status_map.entry(url.to_string()) {
+            Entry::Occupied(e) if matches!(e.get().status.as_str(), "pending" | "processing") => {
+                false
+            }
+            entry => {
+                entry.insert(JobStatus::pending(job_type, url));
+                true
+            }
+        }
     }
 
     /// Submit a job with detailed queue status
@@ -932,6 +955,29 @@ mod tests {
             failed.timestamp + 300,
             300
         ));
+    }
+
+    /// Concurrent creates for one URL must enqueue exactly one AddWorker, and a
+    /// terminal status must not block the next attempt (#1533).
+    #[test]
+    fn claim_admits_one_in_flight_job_per_url() {
+        let map = Arc::new(DashMap::new());
+        let won: Vec<bool> = (0..16)
+            .map(|_| {
+                let map = Arc::clone(&map);
+                std::thread::spawn(move || JobQueue::claim(&map, "http://w:8000", "AddWorker"))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(won.iter().filter(|&&w| w).count(), 1);
+
+        map.insert(
+            "http://w:8000".to_string(),
+            JobStatus::failed("AddWorker", "http://w:8000", "boom".to_string()),
+        );
+        assert!(JobQueue::claim(&map, "http://w:8000", "AddWorker"));
     }
 
     /// The queue channel and dispatch semaphore are sized from the config,

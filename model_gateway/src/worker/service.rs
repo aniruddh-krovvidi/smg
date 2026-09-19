@@ -313,17 +313,20 @@ impl WorkerService {
             registration_mode: WorkerRegistrationMode::CreateOnly,
         };
 
-        let submitted = match self.get_job_queue() {
-            Ok(queue) => queue
-                .submit(job)
-                .await
-                .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e }),
-            Err(e) => Err(e),
+        let queue = match self.get_job_queue() {
+            Ok(queue) => queue,
+            Err(e) => {
+                self.worker_registry.release_reservation(&worker_url);
+                return Err(e);
+            }
         };
-        if let Err(e) = submitted {
+        // A create for a URL whose AddWorker is still in flight reuses that
+        // attempt instead of submitting a second job, so exactly one attempt
+        // owns the reservation and a failed one can safely release it (#1533).
+        if let Err(e) = queue.submit_if_idle(job).await {
             // No 202 goes out, so nothing may keep this URL reserved (#1533).
             self.worker_registry.release_reservation(&worker_url);
-            return Err(e);
+            return Err(WorkerServiceError::QueueSubmitFailed { message: e });
         }
 
         let location = format!("/workers/{}", worker_id.as_str());
