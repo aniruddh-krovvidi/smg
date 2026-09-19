@@ -313,10 +313,18 @@ impl WorkerService {
             registration_mode: WorkerRegistrationMode::CreateOnly,
         };
 
-        self.get_job_queue()?
-            .submit(job)
-            .await
-            .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e })?;
+        let submitted = match self.get_job_queue() {
+            Ok(queue) => queue
+                .submit(job)
+                .await
+                .map_err(|e| WorkerServiceError::QueueSubmitFailed { message: e }),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = submitted {
+            // No 202 goes out, so nothing may keep this URL reserved (#1533).
+            self.worker_registry.release_reservation(&worker_url);
+            return Err(e);
+        }
 
         let location = format!("/workers/{}", worker_id.as_str());
 
@@ -658,5 +666,21 @@ mod tests {
             .expect_err("queue is uninitialized in the test harness");
 
         assert!(matches!(err, WorkerServiceError::QueueNotInitialized));
+    }
+
+    #[tokio::test]
+    async fn create_worker_releases_reservation_when_submission_fails() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let service = make_service(Arc::clone(&registry));
+        // Idempotent, so this is the id create_worker will hand out.
+        let reserved = registry.reserve_id_for_url("grpc://10.0.0.5:8000");
+
+        service
+            .create_worker(worker_spec("grpc://10.0.0.5:8000"))
+            .await
+            .expect_err("queue is uninitialized in the test harness");
+
+        // The 202 was never sent, so nothing may keep the URL reserved (#1533).
+        assert!(registry.get_url_by_id(&reserved).is_none());
     }
 }

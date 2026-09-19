@@ -294,6 +294,10 @@ impl JobQueue {
                 let result = Self::execute_job(&job, &ctx).await;
                 let duration = start.elapsed();
                 Self::record_job_completion(job_type, &worker_url, duration, &result, &status_map);
+                if result.is_err() && matches!(job, Job::AddWorker { .. }) {
+                    // The id handed out in the 202 never got a worker; drop it (#1533).
+                    ctx.worker_registry.release_reservation(&worker_url);
+                }
             }
             None => {
                 let error_msg = "AppContext dropped".to_string();
